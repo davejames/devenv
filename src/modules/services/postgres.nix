@@ -99,7 +99,7 @@ let
       echo "PostgreSQL is setting up the initial database."
       echo
       OLDPGHOST="$PGHOST"
-      PGHOST=$(mktemp -d "$DEVENV_STATE/pg-init-XXXXXX")
+      PGHOST=$(mktemp -d "$OLDPGHOST/pg-init-XXXXXX")
 
       function remove_tmp_pg_init_sock_dir() {
         if [[ -d "$1" ]]; then
@@ -125,9 +125,32 @@ let
   '';
   startScript = pkgs.writeShellScriptBin "start-postgres" ''
     set -euo pipefail
+
+    # Update PGHOST to the socket specificed in `unix_socket_directories`
+    function pg_sock_dir() {
+      if [[ "${cfg.settings.unix_socket_directories}" == /* ]]; then
+        echo "${cfg.settings.unix_socket_directories}"
+      else
+        echo $(realpath -m "$PGHOST/${cfg.settings.unix_socket_directories}")
+      fi
+    }
+    export PGHOST=$(pg_sock_dir)
+
     ${setupScript}/bin/setup-postgres
     exec ${postgresPkg}/bin/postgres
   '';
+    getAbsoluteUnixSocketDir = unixSocketDir:
+      let
+        isAbsolute = builtins.substring 0 1 unixSocketDir == "/";
+      in
+        if isAbsolute then
+          unixSocketDir
+        else
+          config.env.PGDATA + "/" + unixSocketDir;
+    # unixSocketDir = cfg.settings.unix_socket_directories;
+    # isAbsolute = builtins.substring 0 1 unixSocketDir == "/";
+    # absoluteUnixSocketDir = if isAbsolute then unixSocketDir else config.env.PGDATA + "/" + unixSocketDir;
+    unixSocketDir = getAbsoluteUnixSocketDir cfg.settings.unix_socket_directories;
 in
 {
   imports = [
@@ -279,10 +302,14 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+
+    
+
     packages = [ postgresPkg startScript ];
 
     env.PGDATA = config.env.DEVENV_STATE + "/postgres";
-    env.PGHOST = config.env.PGDATA;
+    env.PGHOST = unixSocketDir;
+    # config.env.PGDATA;
     env.PGPORT = cfg.port;
 
     services.postgres.settings = {
@@ -300,7 +327,7 @@ in
         shutdown.signal = 2;
 
         readiness_probe = {
-          exec.command = "${postgresPkg}/bin/pg_isready -h $PGDATA -d template1";
+          exec.command = "${postgresPkg}/bin/pg_isready -h $PGHOST -d template1";
           initial_delay_seconds = 2;
           period_seconds = 10;
           timeout_seconds = 4;
